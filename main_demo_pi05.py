@@ -45,8 +45,9 @@ class Args:
     log_groundtruth: bool = True
     groundtruth_out_path: str = "data/libero/groundtruth"
     # An obstacle is "knocked" once its root body has moved more than this many
-    # meters from its initial pose (latched True for the rest of the episode).
-    knock_threshold: float = 0.05
+    # meters from its reference pose (captured after warmup; latched True for the
+    # rest of the episode). 0.08 leaves margin above residual settling jitter.
+    knock_threshold: float = 0.08
 
 
 def eval_libero(args: Args) -> None:
@@ -98,15 +99,15 @@ def eval_libero(args: Args) -> None:
             action_plan = collections.deque()
             done = False
 
-            # Per-episode ground-truth state. Trackers/initial poses are built
-            # AFTER set_init_state so obstacle bodies are at their start pose.
+            # Per-episode ground-truth state. The geom-set trackers are built now
+            # (geom membership is unaffected by settling), but the knock-reference
+            # poses are captured AFTER the warmup loop -- see below. Capturing them
+            # here (at reset) is too early: objects settle slightly under gravity
+            # during warmup, which would latch knocked=True at t=0 (false positive).
             gt_rows = []
+            init_poses = None
             if args.log_groundtruth:
                 trackers = _build_safety_trackers(env)
-                init_poses = {
-                    name: np.asarray(env.sim.data.body_xpos[bid], dtype=float).copy()
-                    for name, bid in zip(trackers["obstacle_names"], trackers["obstacle_body_ids"])
-                }
                 knocked_state = {}
 
             logging.info(f"Starting episode {task_episodes+1}...")
@@ -116,6 +117,16 @@ def eval_libero(args: Args) -> None:
                         obs, reward, done, info = env.step(LIBERO_DUMMY_ACTION)
                         t += 1
                         continue
+
+                    # Capture knock-reference poses once, right after warmup and
+                    # before the first inference. The objects have now settled and
+                    # the robot has not acted yet, so any later displacement beyond
+                    # knock_threshold is genuinely robot-caused.
+                    if args.log_groundtruth and init_poses is None:
+                        init_poses = {
+                            name: np.asarray(env.sim.data.body_xpos[bid], dtype=float).copy()
+                            for name, bid in zip(trackers["obstacle_names"], trackers["obstacle_body_ids"])
+                        }
 
                     img = np.ascontiguousarray(obs["agentview_image"][::-1, ::-1])
                     wrist_img = np.ascontiguousarray(obs["robot0_eye_in_hand_image"][::-1, ::-1])
