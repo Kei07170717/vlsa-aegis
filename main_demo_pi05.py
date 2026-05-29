@@ -121,12 +121,10 @@ def eval_libero(args: Args) -> None:
                     # Capture knock-reference poses once, right after warmup and
                     # before the first inference. The objects have now settled and
                     # the robot has not acted yet, so any later displacement beyond
-                    # knock_threshold is genuinely robot-caused.
+                    # knock_threshold is genuinely robot-caused. This also prunes
+                    # phantom obstacles (declared in BDDL but not placed this task).
                     if args.log_groundtruth and init_poses is None:
-                        init_poses = {
-                            name: np.asarray(env.sim.data.body_xpos[bid], dtype=float).copy()
-                            for name, bid in zip(trackers["obstacle_names"], trackers["obstacle_body_ids"])
-                        }
+                        init_poses = _capture_obstacle_reference(env, trackers)
 
                     img = np.ascontiguousarray(obs["agentview_image"][::-1, ::-1])
                     wrist_img = np.ascontiguousarray(obs["robot0_eye_in_hand_image"][::-1, ::-1])
@@ -204,6 +202,19 @@ def eval_libero(args: Args) -> None:
 
     logging.info(f"Total success rate: {float(total_successes) / float(total_episodes)}")
 
+    # Batch summary. global_infer_id advanced once per inference across ALL
+    # episodes, so its final value is the total number of inferences == the
+    # expected number of server activation files. The range below should equal
+    # act_00000.npz .. act_{global_infer_id-1:05d}.npz.
+    if global_infer_id > 0:
+        logging.info(
+            f"BATCH DONE: {total_episodes} rollout(s), {global_infer_id} inference step(s) logged, "
+            f"global_infer_id range [0, {global_infer_id - 1}] "
+            f"(expect {global_infer_id} activation files: act_00000.npz..act_{global_infer_id - 1:05d}.npz)"
+        )
+    else:
+        logging.info("BATCH DONE: 0 inference steps logged.")
+
 
 _OBSTACLE_RE = re.compile(r"_obstacle_\d+")
 
@@ -220,8 +231,25 @@ def _build_safety_trackers(env):
     base = env.env
     model = env.sim.model
 
-    obstacle_names = [n for n in base.objects_dict if _OBSTACLE_RE.search(n)]
-    obstacle_body_ids = [base.obj_body_id[n] for n in obstacle_names]
+    # Candidates from the BDDL :objects block. NOTE: this is a superset of what
+    # is actually placed in the scene -- an obstacle declared in :objects but not
+    # given a placement sits at an invalid/default pose. Such phantoms are pruned
+    # later (after warmup) by _capture_obstacle_reference(); body-id resolution
+    # here is defensive so an unresolvable name never crashes the run.
+    candidate_names = [n for n in base.objects_dict if _OBSTACLE_RE.search(n)]
+    obstacle_names, obstacle_body_ids = [], []
+    for n in candidate_names:
+        body_id = base.obj_body_id.get(n)
+        if body_id is None:
+            try:
+                body_id = model.body_name2id(base.objects_dict[n].root_body)
+            except Exception:
+                body_id = None
+        if body_id is None:
+            logging.warning(f"[groundtruth] obstacle '{n}' has no resolvable body id; skipping")
+            continue
+        obstacle_names.append(n)
+        obstacle_body_ids.append(int(body_id))
     obj_of_interest = set(base.obj_of_interest)
 
     # Classify every geom by the body it belongs to. A collision "counts" only
@@ -262,6 +290,45 @@ def _obstacle_collision(env, trackers) -> bool:
         ):
             return True
     return False
+
+
+# Obstacles whose reference pose is NaN or within this many meters of the world
+# origin are treated as phantoms (declared in BDDL but not placed in this task's
+# scene). Real obstacles sit on the table surface, well away from the origin.
+_PHANTOM_ORIGIN_EPS = 0.05
+
+
+def _capture_obstacle_reference(env, trackers):
+    """Capture post-warmup reference poses and prune phantom obstacles.
+
+    Called once per episode right after warmup. `objects_dict` (the BDDL
+    :objects block) is a superset of what is actually placed in the live scene;
+    unplaced obstacles read an invalid/default pose (NaN or ~world origin) and
+    would otherwise latch knocked=True at step 0. We validate each candidate
+    against the live model here -- where the scene has settled and the robot has
+    not yet acted -- and keep only obstacles with a finite, off-origin pose.
+
+    Mutates `trackers["obstacle_names"]`/`["obstacle_body_ids"]` to the kept set
+    and returns the reference poses for those obstacles. Obstacle sets may differ
+    per task; that's expected (the probe join key is global_infer_id, not schema).
+    """
+    sim = env.sim
+    kept_names, kept_body_ids, init_poses = [], [], {}
+    for name, body_id in zip(trackers["obstacle_names"], trackers["obstacle_body_ids"]):
+        pos = np.asarray(sim.data.body_xpos[body_id], dtype=float)
+        if not np.all(np.isfinite(pos)) or float(np.linalg.norm(pos)) < _PHANTOM_ORIGIN_EPS:
+            logging.warning(
+                f"[groundtruth] skipping phantom obstacle '{name}' "
+                f"(invalid reference pose {pos.tolist()})"
+            )
+            continue
+        kept_names.append(name)
+        kept_body_ids.append(body_id)
+        init_poses[name] = pos.copy()
+    trackers["obstacle_names"] = kept_names
+    trackers["obstacle_body_ids"] = kept_body_ids
+    logging.info(f"[groundtruth] tracking {len(kept_names)} obstacle(s): {kept_names}")
+    return init_poses
 
 
 def _collect_groundtruth(env, obs, trackers, init_poses, knocked_state, knock_threshold,
