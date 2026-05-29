@@ -85,12 +85,22 @@ def _get_libero_env(task, level, resolution, seed):
 def eval_libero(args: Args) -> None:
     np.random.seed(args.seed)
 
-    # Load model + processor
+    # Load model + processor using prismatic's loader (bypasses HF trust_remote_code)
     logging.info(f"Loading OpenVLA: {args.model_id}")
+    from transformers import AutoConfig, AutoImageProcessor
+    from prismatic.extern.hf.configuration_prismatic import OpenVLAConfig
+    from prismatic.extern.hf.modeling_prismatic import OpenVLAForActionPrediction
+    from prismatic.extern.hf.processing_prismatic import PrismaticImageProcessor, PrismaticProcessor
+
+    AutoConfig.register("openvla", OpenVLAConfig)
+    AutoImageProcessor.register(OpenVLAConfig, PrismaticImageProcessor)
+    AutoProcessor.register(OpenVLAConfig, PrismaticProcessor)
+    AutoModelForVision2Seq.register(OpenVLAConfig, OpenVLAForActionPrediction)
+
     processor = AutoProcessor.from_pretrained(args.model_id, trust_remote_code=True)
     vla = AutoModelForVision2Seq.from_pretrained(
         args.model_id,
-        attn_implementation="sdpa",  # no flash-attn
+        attn_implementation="sdpa",
         torch_dtype=torch.bfloat16,
         low_cpu_mem_usage=True,
         trust_remote_code=True,
