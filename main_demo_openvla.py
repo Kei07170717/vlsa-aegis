@@ -103,7 +103,7 @@ def eval_libero(args: Args) -> None:
         attn_implementation="sdpa",
         torch_dtype=torch.bfloat16,
         low_cpu_mem_usage=True,
-        trust_remote_code=True,
+        trust_remote_code=False,
     ).to(args.device)
     vla.eval()
     logging.info("Model loaded.")
