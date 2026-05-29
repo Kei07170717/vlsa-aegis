@@ -33,7 +33,7 @@ LIBERO_ENV_RESOLUTION = 256
 class Args:
     # Model
     model_id: str = "openvla/openvla-7b-finetuned-libero-spatial"
-    unnorm_key: str = "libero_spatial_no_noops"
+    unnorm_key: str = "libero_spatial"
     device: str = "cuda:0"
 
     # SafeLIBERO
